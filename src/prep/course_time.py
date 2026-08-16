@@ -63,7 +63,9 @@ def getSessionArray(time_str: str) -> list[dict]:
             current_end_time = idx
             last_time = idx
 
-    if recording:  # 僅在確有記錄到節次時才收尾,避免「只有星期」產生幻影節次
+    # Only close a run that actually recorded periods — a weekday on its own
+    # would otherwise emit a phantom session.
+    if recording:
         push_into_res()
     return res
 

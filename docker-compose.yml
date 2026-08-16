@@ -21,8 +21,6 @@ services:
   # profile so it never starts alongside postgres — run it explicitly:
   #
   #   LOAD_SQLITE=/path/to/1151.db docker compose --profile load run --rm pgloader
-  #
-  # No arm64 image is published, so Apple Silicon runs it under emulation.
   pgloader:
     image: ghcr.io/dimitri/pgloader:latest
     platform: linux/amd64
@@ -31,9 +29,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      # A default, not ${LOAD_SQLITE:?...}: a required variable makes *every*
-      # compose command fail, including `up -d postgres`.
-      - ${LOAD_SQLITE:-./raw/missing-set-LOAD_SQLITE.db}:/data/source.db:ro
+      - ${LOAD_SQLITE:-./data.db}:/data/source.db:ro
     command: >
       pgloader
       sqlite:///data/source.db

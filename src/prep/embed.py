@@ -29,7 +29,7 @@ def vec_to_pg(embedding) -> str:
 
 
 def create_vector_index(cur, conn) -> None:
-    print("[embed] 建立 HNSW cosine 索引 ...", flush=True)
+    print("[embed] building the HNSW cosine index ...", flush=True)
     cur.execute("""
         CREATE INDEX IF NOT EXISTS course_embedding_hnsw_idx
         ON public.course
@@ -37,7 +37,7 @@ def create_vector_index(cur, conn) -> None:
         WITH (m = 16, ef_construction = 64)
     """)
     conn.commit()
-    print("[embed] 索引完成。", flush=True)
+    print("[embed] index built.", flush=True)
 
 
 def main() -> None:
@@ -45,7 +45,7 @@ def main() -> None:
     from sentence_transformers import SentenceTransformer
 
     device = pick_device()
-    print(f"[embed] 載入 {EMBED_MODEL}(device={device}) ...", flush=True)
+    print(f"[embed] loading {EMBED_MODEL} (device={device}) ...", flush=True)
     model = SentenceTransformer(
         EMBED_MODEL, device=device, model_kwargs={"torch_dtype": torch.float32}
     )
@@ -57,11 +57,12 @@ def main() -> None:
     )
     if actual_dim != EMBED_DIM:
         raise SystemExit(
-            f"模型維度 {actual_dim} 與 contract.yaml 的 embed_dim={EMBED_DIM} 不符。\n"
-            f"兩個 repo 的 contract.yaml 要一起改,而且 course.embedding 欄位型別是 "
-            f"vector({EMBED_DIM}) —— 換模型要重跑 migrate 並清掉舊向量。"
+            f"model dimension {actual_dim} does not match embed_dim={EMBED_DIM} in "
+            "contract.yaml.\nChanging the model means shipping a new contract too, "
+            f"and course.embedding is already typed vector({EMBED_DIM}) — rerun "
+            "migrate and clear the old vectors."
         )
-    print(f"[embed] 維度 {actual_dim} 與契約相符。", flush=True)
+    print(f"[embed] dimension {actual_dim} matches the contract.", flush=True)
 
     conn = psycopg2.connect(database_url())
     conn.autocommit = False
@@ -74,10 +75,10 @@ def main() -> None:
         sem,
     )
     total = cur.fetchone()[0]
-    print(f"[embed] {COURSE_YEAR}-{COURSE_SEMESTER} 待處理 {total} 門", flush=True)
+    print(f"[embed] {COURSE_YEAR}-{COURSE_SEMESTER}: {total} courses to process", flush=True)
 
     if total == 0:
-        print("[embed] 全部都已經有向量了。", flush=True)
+        print("[embed] every course already has a vector.", flush=True)
         create_vector_index(cur, conn)
         cur.close()
         conn.close()
@@ -105,7 +106,7 @@ def main() -> None:
         skipped = 0
         for course_id, emb in zip(ids, embeddings):
             if torch.isnan(torch.tensor(emb)).any():
-                print(f"[embed] 警告:id={course_id} 產生 NaN,改存零向量", flush=True)
+                print(f"[embed] warning: id={course_id} produced NaN, storing a zero vector", flush=True)
                 emb = torch.zeros(EMBED_DIM)
                 skipped += 1
             cur.execute(
@@ -117,10 +118,10 @@ def main() -> None:
         processed += len(rows)
         msg = f"[embed] {processed}/{total} ({100 * processed // total}%)"
         if skipped:
-            msg += f"  [{skipped} 筆 NaN]"
+            msg += f"  [{skipped} NaN]"
         print(msg, flush=True)
 
-    print("[embed] 全部完成。", flush=True)
+    print("[embed] all done.", flush=True)
     create_vector_index(cur, conn)
     cur.close()
     conn.close()

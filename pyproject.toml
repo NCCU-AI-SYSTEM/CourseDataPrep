@@ -11,18 +11,6 @@ dependencies = [
     "torch>=2.10.0",
 ]
 
-[project.optional-dependencies]
-# 【已棄用】只有 build_sqlite(舊 SQLite/FAISS 路徑)需要。
-# CourseLangChain 的 USE_SQLITE 已標記棄用,這組相依也會一起退場。
-sqlite = [
-    "faiss-cpu>=1.13.2",
-    "jieba>=0.42.1",
-    "langchain-classic>=1.0.3",
-    "langchain-community>=0.4.1",
-    "langchain-huggingface>=1.2.1",
-    "rank-bm25>=0.2.2",
-]
-
 # 刻意「不」把 torch 釘在 CPU wheel index。
 #
 # 這個 repo 的存在理由就是把 embedding 這種吃 GPU 的工作搬到 host 上跑 —— Docker

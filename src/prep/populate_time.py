@@ -49,10 +49,10 @@ def main() -> None:
 
     cur.execute("SELECT COUNT(*) FROM public.course WHERE sessions IS NULL")
     total = cur.fetchone()[0]
-    print(f"[populate] 待處理 {total} 列", flush=True)
+    print(f"[populate] {total} rows to process", flush=True)
 
     if total == 0:
-        print("[populate] 沒事可做。", flush=True)
+        print("[populate] nothing to do.", flush=True)
         cur.close()
         conn.close()
         return
@@ -83,7 +83,7 @@ def main() -> None:
     upd.close()
     cur.close()
     conn.close()
-    print(f"[populate] 完成,共更新 {processed} 列。", flush=True)
+    print(f"[populate] done, {processed} rows updated.", flush=True)
 
 
 if __name__ == "__main__":

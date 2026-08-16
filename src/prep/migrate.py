@@ -22,10 +22,9 @@ def _require_course_table(cur) -> None:
     cur.execute("SELECT to_regclass('public.course')")
     if cur.fetchone()[0] is None:
         raise SystemExit(
-            "資料庫裡沒有 public.course。\n"
-            "請先把原始課程 SQL 放進 CourseLangChain/dumps/ 再 "
-            "`docker compose down -v && docker compose up -d postgres`,\n"
-            "容器起來時會用 psql 灌進去,之後再回來跑 migrate。"
+            "No public.course in the database — run step 2 first to load the "
+            "crawler's SQLite:\n"
+            "  LOAD_SQLITE=<crawler>.db docker compose --profile load run --rm pgloader"
         )
 
 
@@ -58,7 +57,7 @@ def main() -> None:
             with open(path, encoding="utf-8") as f:
                 sql = f.read()
             sql = sql.replace("${EMBED_DIM}", str(EMBED_DIM))
-            print(f"[migrate] 套用 {name} ...", flush=True)
+            print(f"[migrate] applying {name} ...", flush=True)
             cur.execute(sql)
 
         _write_schema_meta(cur)
@@ -70,7 +69,7 @@ def main() -> None:
         cur.close()
         conn.close()
 
-    print("[migrate] 完成。schema_meta:", flush=True)
+    print("[migrate] done. schema_meta:", flush=True)
     for key, value in SCHEMA_META.items():
         print(f"           {key} = {value}", flush=True)
 

@@ -1,66 +1,48 @@
-# course-data-prep
+# CourseDataPrep
 
-政大課程資料的準備流程。產出一份 PostgreSQL 成品(`.sql.gz`)給
-[CourseLangChain](https://github.com/NCCUCourseScheduling/CourseLangGraph)(查詢端)使用。
+Turns the crawler's SQLite database into a PostgreSQL artifact — one
+`data.sql.gz` plus the `contract.yaml` that describes it.
 
-**這個 repo 自己帶一個 PostgreSQL**(`docker compose`,對外 port **5433**),原始課程資料與
-所有中間狀態都留在這裡。查詢端只收最後產出的 `.sql.gz` 成品 —— 未處理的原始資料不該進到那個
-純執行期的 repo。
+This repo carries its own PostgreSQL (`docker compose`, port **5433**). Raw
+course data and every intermediate state stay here; only the finished artifact
+leaves.
 
-用的是與查詢端相同的 `paradedb/paradedb` image(內建 `pg_search` + `pgvector`,都預編好),
-所以兩邊擴充版本一致,而且都不需要自己編 Dockerfile。5433 與查詢端的 5432 並存不打架。
+Run once per semester, by whoever maintains the data. If you already have an
+artifact and just want to run the application, you do not need this repo.
 
-> 查詢端的安裝與執行看 [`CourseLangChain/docs/SETUP.md`](../CourseLangChain/docs/SETUP.md)。
-> **這份文件負責的是「資料準備」階段** —— 每學期做一次,由資料維護者執行。
-> 只是要把 app 跑起來、而且已經有別人給的 `.sql.gz`,你不需要這個 repo。
+## Requirements
 
-## 為什麼要拆成獨立 repo
-
-embedding 是整條流程裡唯一真的吃 GPU 的步驟,而 Docker Desktop 在 macOS 沒有 GPU
-passthrough、Linux 要 `nvidia-container-toolkit` —— 放在容器裡跑等於強制用 CPU。搬到
-host 用 `uv` 跑才拿得到 CUDA / MPS。
-
-順帶的好處:查詢端變成純執行期,一般開發者拿到成品就能跑,不用 GPU、不用下載模型。
-
-## 需求
-
-- `python >= 3.13` 與 [`uv`](https://github.com/astral-sh/uv)
-- Docker(這個 repo 的 compose 會起一個 PostgreSQL,port 5433)
-- 爬蟲產出的 SQLite(`NCCUCourse` 的 `.db`,不進 git)
-- 兩個 repo 放成兄弟目錄:
-
-```
-CourseLangChain-agents/
-├── CourseLangChain/       ← 查詢端(含 docker compose)
-└── course-data-prep/      ← 這裡
-```
+- `python >= 3.13` and [`uv`](https://github.com/astral-sh/uv)
+- Docker
+- A SQLite database from the crawler ([NCCUCourse](https://github.com/NCCUCourseScheduling/NCCUCourse)), not in git
 
 ---
 
-# 逐步流程
+# Steps
 
-## 1. 起資料庫
+## 1. Start the database
 
 ```sh
 docker compose up -d postgres
 ```
 
-## 2. 把爬蟲的 SQLite 灌進去
+## 2. Load the crawler's SQLite
 
-[NCCUCourse](https://github.com/NCCUCourseScheduling/NCCUCourse) 爬出來的是 SQLite,
-後面每一步都是 PostgreSQL。pgloader 直接把資料搬進上一步那個資料庫:
+The crawler produces SQLite; everything after this is PostgreSQL. pgloader moves
+the rows straight into the database from step 1:
 
 ```sh
-LOAD_SQLITE=<爬蟲產出>.db docker compose --profile load run --rm pgloader
+LOAD_SQLITE=<crawler>.db docker compose --profile load run --rm pgloader
 #           table name     errors       rows
 #  ---------------------  ---------  ---------
-#          public.course          0       3635
+#          public.course          0       3650
 #            public.rate          0     232652
 #          public.result          0       1308
 #         public.teacher          0         11
 ```
 
-接著把整數欄位收窄 —— SQLite 的 INTEGER 沒有寬度,pgloader 一律當 `bigint` 搬:
+Then narrow the integers. SQLite has no integer width, so pgloader maps every
+INTEGER to `bigint`:
 
 ```sh
 docker compose exec postgres psql -U postgres -d academic -c "
@@ -76,63 +58,70 @@ END;
 \$\$;"
 ```
 
-確認:
+Check:
 
 ```sh
 docker compose exec postgres psql -U postgres -d academic \
   -c "SELECT y, s, COUNT(*) FROM course GROUP BY y,s ORDER BY y DESC LIMIT 3;"
 #   y  | s | count
-#  115 | 1 |  2923     ← contract.yaml 指定的學期
+#  115 | 1 |  3650     <- the semester contract.yaml names
 ```
 
-pgloader 順手處理掉兩件事:表名 `COURSE` → `public.course`(下游都寫 `FROM course`),
-以及依 SQLite schema 建出主鍵。
+pgloader also folds `COURSE` to `public.course`, which is what everything
+downstream queries, and recreates the primary key from the SQLite schema.
 
 > [!IMPORTANT]
-> pgloader 是**建表**,所以重灌前要先清掉舊的:
+> pgloader **creates** tables, so clear the old ones before reloading:
 > ```sh
 > docker compose exec postgres psql -U postgres -d academic \
 >   -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 > ```
-> 另外它遇到約束衝突只會記一行 `ERROR` 然後**照樣 exit 0** —— 例如主鍵欄位有 NULL 時,
-> 整個 PRIMARY KEY 會被默默丟掉。輸出裡出現 `ERROR` 就不要往下走。
+> `CASCADE` also drops the `vector` and `pg_search` extensions, since they live
+> in `public` — the `drop cascades to extension ...` lines are expected, and
+> step 4 recreates them.
+>
+> pgloader logs constraint failures and **exits 0 regardless**. A NULL in a
+> primary-key column, for one, makes the whole PRIMARY KEY disappear. If the
+> output contains `ERROR`, do not continue.
 
-## 3. 安裝
+## 3. Install
 
 ```sh
 uv sync
 ```
 
-`DATABASE_URL` 不用設,預設就是這個 repo 自己的資料庫
-(`postgresql://postgres:postgres@localhost:5433/academic`)。
+`DATABASE_URL` needs no setting; it defaults to this repo's own database
+(`postgresql://postgres:postgres@localhost:5433/academic`).
 
-## 4. 套 schema
+## 4. Apply the schema
 
-建向量欄位、BM25 索引(`pdb.jieba` 分詞)、結構化時間欄位,並把契約寫進 `schema_meta`:
+Adds the vector column, the BM25 index (`pdb.jieba` tokenizer) and the
+structured time columns, and records the contract in `schema_meta`:
 
 ```sh
 uv run python -m prep.migrate
-# [migrate] 套用 02-extensions.sql ...
-# [migrate] 套用 03-schema.sql ...
-# [migrate] 套用 04-time-columns.sql ...
-# [migrate] 完成。schema_meta:
+# [migrate] applying 02-extensions.sql ...
+# [migrate] applying 03-schema.sql ...
+# [migrate] applying 04-time-columns.sql ...
+# [migrate] done. schema_meta:
 #            schema_version = 6
 #            embed_model = BAAI/bge-base-zh-v1.5
 ```
 
-冪等,可以重複執行。
+Idempotent, so it also upgrades an existing database.
 
-## 5. 解析上課時間
+## 5. Parse class times
 
-把 `time_raw`(如 `五234`)拆成 `sessions` / `weekdays` / `has_morning` 等欄位:
+Splits `time_raw` (such as `五234`) into `sessions` / `weekdays` /
+`has_morning`:
 
 ```sh
 uv run python -m prep.populate_time
-# [populate] 101883/101883
-# [populate] 完成,共更新 101883 列。
+# [populate] 3650/3650
+# [populate] done, 3650 rows updated.
 ```
 
-抽查:
+Spot check:
 
 ```sh
 docker compose exec postgres psql -U postgres -d academic \
@@ -140,115 +129,130 @@ docker compose exec postgres psql -U postgres -d academic \
 #  五234 | [{"weekday": 5, "end_hour": 12, "start_hour": 9}]
 ```
 
-`五234` = 星期五第 2~4 節 = 09:00–12:00,對得起來就沒問題。
+`五234` is Friday periods 2–4, which is 09:00–12:00.
 
-## 6. 產生向量 ← **吃 GPU 的一步**
+## 6. Generate vectors — the GPU step
 
 ```sh
 uv run python -m prep.embed
-# [embed] 載入 BAAI/bge-base-zh-v1.5(device=mps) ...
-# [embed] 維度 768 與契約相符。
-# [embed] 3472/3472 (100%)
-# [embed] 建立 HNSW cosine 索引 ...
+# [embed] loading BAAI/bge-base-zh-v1.5 (device=mps) ...
+# [embed] dimension 768 matches the contract.
+# [embed] 3650/3650 (100%)
+# [embed] building the HNSW cosine index ...
 ```
 
-裝置自動挑 `cuda` → `mps` → `cpu`,也可以自己指定:
+The device is chosen `cuda` → `mps` → `cpu`, or set it explicitly:
 
 ```sh
 EMBED_DEVICE=cuda uv run python -m prep.embed
 ```
 
-只處理 `embedding IS NULL` 的列,中斷後直接重跑就會接續。3472 門課在 Apple Silicon
-(MPS)上約數分鐘,純 CPU 明顯久很多。
+Only rows with `embedding IS NULL` are processed, so an interrupted run resumes
+by rerunning. A few minutes for ~3,650 courses on Apple Silicon; considerably
+longer on CPU.
 
-這個 repo 刻意**不**把 torch 釘在 CPU wheel index(理由見 `pyproject.toml`),所以
-Linux/Windows + NVIDIA 會直接拿到 CUDA 版,macOS 原生 wheel 本來就支援 MPS。
+torch is deliberately **not** pinned to the CPU wheel index (see
+`pyproject.toml`), so Linux and Windows with NVIDIA get the CUDA build, and the
+native macOS wheels already support MPS.
 
-## 7. 產出成品
+## 7. Build the artifact
 
-出貨前會擋兩件事:`schema_meta` 與契約不符、還有課沒有向量。
-
-```sh
-uv run python -m prep.dump
-# [dump] 檢查通過:3472 門課,全部有向量。
-# [dump] 完成:out/course-1142.sql.gz(74 MB)
-```
-
-`pg_dump` 是在容器裡跑的(一般開發機不會裝 postgres client),用 `docker compose ps` 找
-自己專案的容器 —— 不會誤抓到查詢端那個。可用 `PG_CONTAINER` 覆寫。
-
-格式是 `pg_dump -Fp --no-owner --no-privileges | gzip`,不是 `-Fc`:postgres 的 entrypoint
-只認得 `*.sql` / `*.sql.gz` 這類,`.dump` 會被 ignore 掉。用 `.sql.gz` 的話查詢端把檔案丟進
-`db/init/` 就會自動還原,不需要任何自訂腳本。兩種格式實測同樣 74MB、資料逐位元相同。
-
-## 8. 交給查詢端
+Check first. Two things block shipping — `schema_meta` disagreeing with
+`contract.yaml`, and any course without a vector — and both fail silently
+downstream:
 
 ```sh
-cp out/course-1142.sql.gz ../CourseLangChain/db/init/
-cd ../CourseLangChain
-docker compose down -v         # ← 一定要 -v
-docker compose up -d postgres
+uv run python -m prep.check
+# [check] passed: 3650 courses, all with vectors.
 ```
 
-查詢端的 `db/init/` 只放**一個**成品檔;原始資料留在這個 repo,不要複製過去。
+Then dump. `pg_dump` runs inside the container, since a development machine
+usually has no postgres client; `gzip` runs here:
 
-> [!IMPORTANT]
-> restore **只在資料庫第一次建立時**發生(容器 initdb 機制)。換成品沒有 `down -v`
-> 清掉 volume 的話,新檔案不會生效,而且不會有任何錯誤訊息。
+```sh
+docker compose exec -T postgres pg_dump -U postgres -d academic \
+  -Fp --no-owner --no-privileges | gzip > data.sql.gz
+```
+
+`-T` matters: without it compose allocates a TTY and corrupts the pipe.
+
+The format is `-Fp … | gzip`, not `-Fc`: the postgres entrypoint restores
+`*.sql` and `*.sql.gz` on first start but ignores `.dump`, so plain SQL needs no
+restore script on the consuming side. Both formats measured the same size with
+byte-identical data.
+
+Two dumps of one database are not byte-identical — PG18 writes a random token
+into the `\restrict` line — but the data is.
+
+## 8. Ship it
+
+Two files make up a release:
+
+```
+data.sql.gz      the data
+contract.yaml    what the data is — which semester, which embedding model
+```
+
+The filename carries no semester because `contract.yaml` already states it, and
+the two only mean anything together.
+
+Copy **both** to whoever consumes them. The artifact is restored by the
+postgres entrypoint; `contract.yaml` is copied as-is, not edited on the other
+side — see below.
+
+Raw course data stays here. It has no place in a runtime repo.
 
 ---
 
 ## contract.yaml
 
-`contract.yaml` 在這裡與 CourseLangChain 的**設定值必須一致**(註解可以各寫各的 ——
-比對的是解析後的值)。`prep.migrate` 會把這些值寫進資料庫的 `schema_meta` 表,
-查詢端開機時比對,不一致就拒絕啟動。
+Describes what the artifact contains: schema version, embedding model,
+dimension, and semester. `prep.migrate` writes these values into the database's
+`schema_meta` table, and they travel inside the artifact.
 
-擋的是這個失敗模式:這邊換了 embedding 模型重新灌資料,那邊沒跟上 —— query 向量與庫裡的
-向量來自不同模型,**檢索不會報錯,只會安靜地回一堆語意無關的課**。
+The consumer keeps a copy of this file and compares it against `schema_meta` at
+startup, refusing to serve on a mismatch. That is why it ships **as a copy**
+rather than being maintained separately in two places — a comparison someone has
+to remember to run is not a safeguard.
 
-確認兩邊有沒有對齊:
+What this prevents: re-embedding here with a different model while the consumer
+still expects the old one. Query vectors and stored vectors then come from
+different models, and **retrieval does not fail — it quietly returns
+semantically unrelated courses**, which is the hardest kind of bug to notice.
 
-```sh
-uv run python -c "import yaml;a=yaml.safe_load(open('contract.yaml'));\
-b=yaml.safe_load(open('../CourseLangChain/contract.yaml'));print('aligned:',a==b)"
-```
+To change the contract: edit it here, rerun `migrate`, clear the old vectors,
+rerun `embed`, build a new artifact, and ship the file alongside it.
 
-改契約的時候:兩個 repo 一起改 → 重跑 `migrate` → 清掉舊向量 → 重跑 `embed` → 重新產 dump。
+## What each module does
 
-## 各步驟在做什麼
-
-| 模組 | 作用 |
+| Module | Purpose |
 |---|---|
-| `prep.migrate` | 套 `init-scripts/02~04`,建 `schema_meta`。其中 `03-schema.sql` 建 BM25 索引 `USING bm25 (pk, (content_text::pdb.jieba))` —— `pk` 是代理鍵,因為 ParadeDB 的 `key_field` 必須唯一,而來源的 `course.id` 有重複(101883 列只有 81226 個不同 id)。 |
-| `prep.populate_time` | `time_raw` → `sessions` jsonb / `weekdays` / `has_morning` 等旗標。解析器 `course_time.py` 是從查詢端 `utils/time.py` 抄過來的硬化版(兩個 repo 刻意不共用程式碼)。 |
-| `prep.embed` | 用 `contract.yaml` 指定的模型產向量寫進 `course.embedding`,最後建 HNSW cosine 索引。 |
-| `prep.dump` | 出貨前擋契約不符與缺向量,然後在容器裡跑 `pg_dump -Fp … | gzip`。 |
-| `prep.build_sqlite` | **【已棄用】** 舊 SQLite/FAISS 路徑的索引。需要 `uv sync --extra sqlite`。 |
+| `prep.migrate` | Applies `init-scripts/02~04` and creates `schema_meta`. `03-schema.sql` builds the BM25 index `USING bm25 (pk, (content_text::pdb.jieba))` — `pk` is a surrogate key, because ParadeDB's `key_field` must be unique and `course.id` is not (101,883 rows carry 81,226 distinct ids). `content_text` is assembled from whichever text columns exist, so a semester with extra syllabus sections indexes them without a code change. |
+| `prep.populate_time` | `time_raw` → `sessions` jsonb, `weekdays`, and the `has_*` flags. The parser in `course_time.py` is a hardened copy of the consumer's; the two deliberately share no code. |
+| `prep.embed` | Encodes with the model named in `contract.yaml`, writes `course.embedding`, then builds the HNSW cosine index. |
+| `prep.check` | Blocks shipping on a contract mismatch or a missing vector. Building the artifact is one shell pipe, so it stays in the README. |
+| `prep.build_sqlite` | **Deprecated.** Indexes for the old SQLite/FAISS path. Needs `uv sync --extra sqlite`. |
 
-## 疑難排解
+## Troubleshooting
 
-### embedding 模型下載失敗(401 / GatedRepoError)
+### Embedding model fails to download (401 / GatedRepoError)
 
-`contract.yaml` 指到的是 gated model(要在 HuggingFace 申請授權)。要嘛設好 `HF_TOKEN`,
-要嘛換成非 gated 的同維度模型 —— 兩個 repo 的 `contract.yaml` 一起改,再重跑 `prep.embed`。
+`contract.yaml` names a gated model, which requires access approval on
+HuggingFace. Either set `HF_TOKEN`, or switch to an ungated model of the same
+dimension and rerun `prep.embed`.
 
-### 建 HNSW 索引時 `could not resize shared memory segment`
+### `could not resize shared memory segment` while building the HNSW index
 
-Docker 預設只給 `/dev/shm` 64MB。這個 repo 的 compose 已經設 `shm_size: 1gb`;
-若是自己另外起的容器記得加上。
+Docker gives `/dev/shm` only 64MB by default. This repo's compose sets
+`shm_size: 1gb`; add it if you start the container some other way.
 
-### `prep.dump` 說「還有 N 門課沒有向量」
+### `prep.check` reports courses without vectors
 
-`prep.embed` 沒跑完。直接重跑,它只會處理還沒做的列。
+`prep.embed` did not finish. Rerun it — it only processes what is still missing.
 
-### 維度不符
+### Dimension mismatch
 
-`[embed] 模型維度 X 與 contract.yaml 的 embed_dim=Y 不符`。換模型要同時改 `embed_dim`,
-而且 `course.embedding` 欄位型別已經是 `vector(Y)` —— 要重跑 `migrate` 並清掉舊向量。
-
-## 已棄用:SQLite / FAISS
-
-查詢端的 `USE_SQLITE` 已標記棄用 —— PostgreSQL 現在做的是同一件事(BM25 + 向量 + RRF),
-而且只要一份成品,不用 `data.db` + `faiss_index/` + `courses.jsonl` 三份成品。
-`prep.build_sqlite` 只為了讓還沒搬完的環境能繼續運作,不要拿它做新東西。
+`[embed] model dimension X does not match embed_dim=Y in contract.yaml`.
+Changing the model
+means changing `embed_dim` too, and `course.embedding` is already typed
+`vector(Y)`, so rerun `migrate` and clear the old vectors.
