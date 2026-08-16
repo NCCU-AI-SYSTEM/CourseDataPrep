@@ -21,6 +21,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_course_pk ON public.course (pk);
 -- Those four are still returned by the consumer's course_detail tool, so the
 -- model can discuss them once a course is identified — they just should not be
 -- what surfaces it.
+--
+-- teacher is in the list for the opposite reason. A name is a handful of
+-- characters, so it costs nothing against length normalisation, and it is the
+-- one field vectors cannot substitute for: an embedding has no way to place a
+-- rare proper noun, so "翁堃嵐 老師開的課" returned unrelated language courses
+-- until BM25 could match the name literally.
 DO $$
 DECLARE expr text;
 BEGIN
@@ -31,8 +37,8 @@ BEGIN
     FROM information_schema.columns
     WHERE table_schema = 'public'
       AND table_name = 'course'
-      AND column_name IN ('name', 'nameen', 'objective', 'syllabus', 'schedule',
-                          'evaluation', 'textbook');
+      AND column_name IN ('name', 'nameen', 'teacher', 'objective', 'syllabus',
+                          'schedule', 'evaluation', 'textbook');
 
     IF expr IS NULL THEN
         RAISE EXCEPTION 'course has none of the expected text columns';

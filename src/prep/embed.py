@@ -1,9 +1,9 @@
-"""Write vectors into course.embedding. The only GPU-bound step.
+"""Split each course into chunks and embed them. The only GPU-bound step.
 
     uv run python -m prep.embed
     EMBED_DEVICE=cuda uv run python -m prep.embed
 
-Only touches rows where embedding IS NULL, so it resumes after an interrupt.
+Skips courses that already have chunks, so it resumes after an interrupt.
 """
 from __future__ import annotations
 
@@ -11,33 +11,15 @@ import sys
 
 import psycopg2
 
+from .chunk import CHUNK_COLUMNS, build_chunks, make_splitter
 from .contract import COURSE_SEMESTER, COURSE_YEAR, EMBED_DIM, EMBED_MODEL, database_url
 from .device import pick_device
 
 BATCH_SIZE = 32
-MAX_TEXT_CHARS = 3000
-
-
-def build_doc_text(name, nameen, objective, syllabus, schedule) -> str:
-    title = " / ".join(filter(None, [name, nameen]))
-    body = " ".join(filter(None, [objective, syllabus, schedule]))
-    return (f"title: {title} | text: {body}")[:MAX_TEXT_CHARS]
 
 
 def vec_to_pg(embedding) -> str:
     return "[" + ",".join(map(str, embedding.tolist())) + "]"
-
-
-def create_vector_index(cur, conn) -> None:
-    print("[embed] building the HNSW cosine index ...", flush=True)
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS course_embedding_hnsw_idx
-        ON public.course
-        USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64)
-    """)
-    conn.commit()
-    print("[embed] index built.", flush=True)
 
 
 def main() -> None:
@@ -59,8 +41,8 @@ def main() -> None:
         raise SystemExit(
             f"model dimension {actual_dim} does not match embed_dim={EMBED_DIM} in "
             "contract.yaml.\nChanging the model means shipping a new contract too, "
-            f"and course.embedding is already typed vector({EMBED_DIM}) — rerun "
-            "migrate and clear the old vectors."
+            f"and course_chunk.embedding is already typed vector({EMBED_DIM}) — "
+            "rerun migrate and clear course_chunk."
         )
     print(f"[embed] dimension {actual_dim} matches the contract.", flush=True)
 
@@ -68,29 +50,39 @@ def main() -> None:
     conn.autocommit = False
     cur = conn.cursor()
 
+    splitter = make_splitter(model.tokenizer)
     sem = (COURSE_YEAR, COURSE_SEMESTER)
+
+    # Chunks are per distinct course, not per row: a course appears in course
+    # once for every category it belongs to.
     cur.execute(
-        "SELECT COUNT(*) FROM public.course "
-        "WHERE y = %s AND s = %s AND embedding IS NULL",
+        """
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT id FROM public.course
+            WHERE y = %s AND s = %s
+              AND id NOT IN (SELECT course_id FROM public.course_chunk)
+        ) t
+        """,
         sem,
     )
     total = cur.fetchone()[0]
     print(f"[embed] {COURSE_YEAR}-{COURSE_SEMESTER}: {total} courses to process", flush=True)
 
     if total == 0:
-        print("[embed] every course already has a vector.", flush=True)
-        create_vector_index(cur, conn)
+        print("[embed] every course already has chunks.", flush=True)
         cur.close()
         conn.close()
         return
 
-    processed = 0
+    processed = written = 0
     while True:
         cur.execute(
-            """
-            SELECT id, name, nameen, objective, syllabus, schedule
+            f"""
+            SELECT DISTINCT ON (id) id, {", ".join(CHUNK_COLUMNS)}
             FROM public.course
-            WHERE y = %s AND s = %s AND embedding IS NULL
+            WHERE y = %s AND s = %s
+              AND id NOT IN (SELECT course_id FROM public.course_chunk)
+            ORDER BY id
             LIMIT %s
             """,
             (*sem, BATCH_SIZE),
@@ -99,30 +91,40 @@ def main() -> None:
         if not rows:
             break
 
-        ids = [r[0] for r in rows]
-        texts = [build_doc_text(*(c or "" for c in r[1:])) for r in rows]
-        embeddings = model.encode(texts, batch_size=BATCH_SIZE, show_progress_bar=False)
+        pending = []
+        for row in rows:
+            course_id = row[0]
+            course = dict(zip(CHUNK_COLUMNS, row[1:]))
+            for section, text in build_chunks(splitter, course):
+                pending.append((course_id, section, text))
+
+        embeddings = model.encode(
+            [text for _, _, text in pending],
+            batch_size=BATCH_SIZE,
+            show_progress_bar=False,
+        )
 
         skipped = 0
-        for course_id, emb in zip(ids, embeddings):
+        for (course_id, section, text), emb in zip(pending, embeddings):
             if torch.isnan(torch.tensor(emb)).any():
-                print(f"[embed] warning: id={course_id} produced NaN, storing a zero vector", flush=True)
+                print(f"[embed] warning: {course_id}/{section} produced NaN, storing a zero vector", flush=True)
                 emb = torch.zeros(EMBED_DIM)
                 skipped += 1
             cur.execute(
-                "UPDATE public.course SET embedding = %s::vector WHERE id = %s",
-                (vec_to_pg(emb), course_id),
+                "INSERT INTO public.course_chunk (course_id, section, chunk_text, embedding) "
+                "VALUES (%s, %s, %s, %s::vector)",
+                (course_id, section, text, vec_to_pg(emb)),
             )
 
         conn.commit()
         processed += len(rows)
-        msg = f"[embed] {processed}/{total} ({100 * processed // total}%)"
+        written += len(pending)
+        msg = f"[embed] {processed}/{total} courses ({100 * processed // total}%), {written} chunks"
         if skipped:
             msg += f"  [{skipped} NaN]"
         print(msg, flush=True)
 
-    print("[embed] all done.", flush=True)
-    create_vector_index(cur, conn)
+    print(f"[embed] all done, {written} chunks.", flush=True)
     cur.close()
     conn.close()
 

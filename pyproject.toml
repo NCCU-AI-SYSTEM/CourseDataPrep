@@ -5,6 +5,7 @@ description = "NCCU 課程資料準備流程 —— 產出 CourseLangChain 查�
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "langchain-text-splitters>=1.1.2",
     "psycopg2-binary>=2.9.10",
     "pyyaml>=6.0",
     "sentence-transformers>=5.3.0",

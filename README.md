@@ -95,20 +95,34 @@ uv sync
 
 ## 4. Apply the schema
 
-Adds the vector column, the BM25 index (`pdb.jieba` tokenizer) and the
-structured time columns, and records the contract in `schema_meta`:
+Adds the surrogate key and BM25 index (`pdb.jieba` tokenizer), the structured
+time columns and the `course_chunk` table, and records the contract in
+`schema_meta`:
 
 ```sh
 uv run python -m prep.migrate
 # [migrate] applying 02-extensions.sql ...
 # [migrate] applying 03-schema.sql ...
 # [migrate] applying 04-time-columns.sql ...
+# [migrate] applying 05-chunks.sql ...
 # [migrate] done. schema_meta:
-#            schema_version = 6
+#            schema_version = 8
 #            embed_model = BAAI/bge-base-zh-v1.5
 ```
 
 Idempotent, so it also upgrades an existing database.
+
+`content_text` — what BM25 sees — is assembled from whichever of `name`,
+`nameen`, `teacher`, `objective`, `syllabus`, `schedule`, `evaluation`,
+`textbook` the semester actually has. The list is short on purpose: BM25
+normalises by document length, so a field that reads the same on every course
+depresses the ones that carry signal. `teaching_approach`, `ai_policy` and the
+`detail_*` sections are boilerplate by that measure and stay out — the
+consumer's `course_detail` tool still returns them once a course is identified.
+
+`teacher` is in the list because vectors cannot replace it: an embedding has
+nowhere to put a rare proper noun, so searching a teacher's name returns
+unrelated courses unless BM25 can match it literally.
 
 ## 5. Parse class times
 
@@ -133,13 +147,29 @@ docker compose exec postgres psql -U postgres -d academic \
 
 ## 6. Generate vectors — the GPU step
 
+Each course is split per field with a recursive character splitter and every
+segment is embedded on its own, into `course_chunk`:
+
 ```sh
 uv run python -m prep.embed
 # [embed] loading BAAI/bge-base-zh-v1.5 (device=mps) ...
 # [embed] dimension 768 matches the contract.
-# [embed] 3650/3650 (100%)
-# [embed] building the HNSW cosine index ...
+# [embed] 2925/2925 courses (100%), 28634 chunks
+# [embed] all done, 28634 chunks.
 ```
+
+One vector per course does not work: the model reads 512 tokens and drops the
+rest, schedule alone has a median of 464, and 82% of courses overran it — so
+whatever came last never reached the model. Chunking removes the ceiling and
+lets a question about the textbook match the textbook instead of a blend of
+everything the course says.
+
+**There is no vector index, on purpose.** pgvector caps an HNSW scan at
+`ef_search` candidates and this ParadeDB build does not expose
+`hnsw.ef_search`, so the vector side returned ~40 rows however large the LIMIT
+— about 12 distinct courses — while BM25 supplied 400. A sequential scan over
+28,634 vectors costs 43-108ms and yields 141-306 courses: exact, uncapped, and
+89MB smaller in the artifact.
 
 The device is chosen `cuda` → `mps` → `cpu`, or set it explicitly:
 
@@ -147,9 +177,9 @@ The device is chosen `cuda` → `mps` → `cpu`, or set it explicitly:
 EMBED_DEVICE=cuda uv run python -m prep.embed
 ```
 
-Only rows with `embedding IS NULL` are processed, so an interrupted run resumes
-by rerunning. A few minutes for ~3,650 courses on Apple Silicon; considerably
-longer on CPU.
+Courses that already have chunks are skipped, so an interrupted run resumes by
+rerunning. Roughly ten minutes for ~2,925 courses on Apple Silicon;
+considerably longer on CPU.
 
 torch is deliberately **not** pinned to the CPU wheel index (see
 `pyproject.toml`), so Linux and Windows with NVIDIA get the CUDA build, and the
@@ -158,12 +188,12 @@ native macOS wheels already support MPS.
 ## 7. Build the artifact
 
 Check first. Two things block shipping — `schema_meta` disagreeing with
-`contract.yaml`, and any course without a vector — and both fail silently
+`contract.yaml`, and any course without an embedded chunk — and both fail silently
 downstream:
 
 ```sh
 uv run python -m prep.check
-# [check] passed: 3650 courses, all with vectors.
+# [check] passed: 2925 courses, 28634 chunks, all embedded.
 ```
 
 Then dump. `pg_dump` runs inside the container, since a development machine
@@ -229,7 +259,7 @@ rerun `embed`, build a new artifact, and ship the file alongside it.
 |---|---|
 | `prep.migrate` | Applies `init-scripts/02~04` and creates `schema_meta`. `03-schema.sql` builds the BM25 index `USING bm25 (pk, (content_text::pdb.jieba))` — `pk` is a surrogate key, because ParadeDB's `key_field` must be unique and `course.id` is not (101,883 rows carry 81,226 distinct ids). `content_text` is assembled from whichever text columns exist, so a semester with extra syllabus sections indexes them without a code change. |
 | `prep.populate_time` | `time_raw` → `sessions` jsonb, `weekdays`, and the `has_*` flags. The parser in `course_time.py` is a hardened copy of the consumer's; the two deliberately share no code. |
-| `prep.embed` | Encodes with the model named in `contract.yaml`, writes `course.embedding`, then builds the HNSW cosine index. |
+| `prep.embed` | Splits each field with `chunk.py` and embeds every segment into `course_chunk`, using the model named in `contract.yaml`. Deliberately builds no vector index — see step 6. |
 | `prep.check` | Blocks shipping on a contract mismatch or a missing vector. Building the artifact is one shell pipe, so it stays in the README. |
 | `prep.build_sqlite` | **Deprecated.** Indexes for the old SQLite/FAISS path. Needs `uv sync --extra sqlite`. |
 
@@ -241,18 +271,18 @@ rerun `embed`, build a new artifact, and ship the file alongside it.
 HuggingFace. Either set `HF_TOKEN`, or switch to an ungated model of the same
 dimension and rerun `prep.embed`.
 
-### `could not resize shared memory segment` while building the HNSW index
+### `could not resize shared memory segment`
 
 Docker gives `/dev/shm` only 64MB by default. This repo's compose sets
 `shm_size: 1gb`; add it if you start the container some other way.
 
-### `prep.check` reports courses without vectors
+### `prep.check` reports courses without an embedded chunk
 
-`prep.embed` did not finish. Rerun it — it only processes what is still missing.
+`prep.embed` did not finish. Rerun it — it skips courses that already have chunks.
 
 ### Dimension mismatch
 
 `[embed] model dimension X does not match embed_dim=Y in contract.yaml`.
 Changing the model
-means changing `embed_dim` too, and `course.embedding` is already typed
-`vector(Y)`, so rerun `migrate` and clear the old vectors.
+means changing `embed_dim` too, and `course_chunk.embedding` is already typed
+`vector(Y)`, so rerun `migrate` and clear `course_chunk`.

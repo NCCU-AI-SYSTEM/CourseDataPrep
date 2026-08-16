@@ -15,7 +15,8 @@ import psycopg2
 
 from .contract import EMBED_DIM, INIT_SCRIPTS_DIR, SCHEMA_META, database_url
 
-DDL_SCRIPTS = ("02-extensions.sql", "03-schema.sql", "04-time-columns.sql")
+DDL_SCRIPTS = ("02-extensions.sql", "03-schema.sql", "04-time-columns.sql",
+               "05-chunks.sql")
 
 
 def _require_course_table(cur) -> None:

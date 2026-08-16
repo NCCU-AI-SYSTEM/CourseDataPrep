@@ -39,23 +39,31 @@ def _verify(conn) -> None:
         )
 
     cur.execute(
-        "SELECT COUNT(*) FROM public.course "
-        "WHERE y = %s AND s = %s AND embedding IS NULL",
+        """
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT id FROM public.course
+            WHERE y = %s AND s = %s
+              AND id NOT IN (SELECT course_id FROM public.course_chunk
+                             WHERE embedding IS NOT NULL)
+        ) t
+        """,
         (COURSE_YEAR, COURSE_SEMESTER),
     )
     missing = cur.fetchone()[0]
     if missing:
         raise SystemExit(
-            f"{missing} courses still have no vector — run `uv run python -m prep.embed`.\n"
+            f"{missing} courses have no embedded chunk — run `uv run python -m prep.embed`.\n"
             "(Shipping a dump with missing vectors silently degrades the consumer "
             "to BM25-only, and nobody notices.)"
         )
 
     cur.execute(
-        "SELECT COUNT(*) FROM public.course WHERE y = %s AND s = %s",
+        "SELECT COUNT(DISTINCT id), (SELECT COUNT(*) FROM public.course_chunk) "
+        "FROM public.course WHERE y = %s AND s = %s",
         (COURSE_YEAR, COURSE_SEMESTER),
     )
-    print(f"[check] passed: {cur.fetchone()[0]} courses, all with vectors.", flush=True)
+    courses, chunks = cur.fetchone()
+    print(f"[check] passed: {courses} courses, {chunks} chunks, all embedded.", flush=True)
     cur.close()
 
 

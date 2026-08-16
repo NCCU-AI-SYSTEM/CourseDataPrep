@@ -19,7 +19,7 @@
 # at startup and refuses to serve on a mismatch.
 
 # Bump when init-scripts change the table structure.
-schema_version: 6
+schema_version: 8
 
 # The embedding model. Queries are encoded with this same model, so a mismatch
 # makes vectors incomparable — retrieval would not error, just rank nonsense.
