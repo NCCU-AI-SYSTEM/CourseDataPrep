@@ -1,0 +1,20 @@
+__pycache__/
+.venv/
+.env
+.DS_Store
+
+# 原始課程資料(校方匯出,239MB 等級,不進 git)
+raw/*.sql
+raw/*.sql.gz
+!raw/.gitkeep
+*.sql.gz
+
+# 產出的成品
+out/
+*.dump
+*.sql.gz
+
+# 【已棄用】舊 SQLite/FAISS 路徑的成品
+faiss_index/
+courses.jsonl
+data.db

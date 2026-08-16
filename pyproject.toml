@@ -1,0 +1,44 @@
+[project]
+name = "course-data-prep"
+version = "0.1.0"
+description = "NCCU 課程資料準備流程 —— 產出 CourseLangChain 查詢用的 PostgreSQL dump"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "psycopg2-binary>=2.9.10",
+    "pyyaml>=6.0",
+    "sentence-transformers>=5.3.0",
+    "torch>=2.10.0",
+]
+
+[project.optional-dependencies]
+# 【已棄用】只有 build_sqlite(舊 SQLite/FAISS 路徑)需要。
+# CourseLangChain 的 USE_SQLITE 已標記棄用,這組相依也會一起退場。
+sqlite = [
+    "faiss-cpu>=1.13.2",
+    "jieba>=0.42.1",
+    "langchain-classic>=1.0.3",
+    "langchain-community>=0.4.1",
+    "langchain-huggingface>=1.2.1",
+    "rank-bm25>=0.2.2",
+]
+
+# 刻意「不」把 torch 釘在 CPU wheel index。
+#
+# 這個 repo 的存在理由就是把 embedding 這種吃 GPU 的工作搬到 host 上跑 —— Docker
+# Desktop 在 macOS 沒有 GPU passthrough,Linux 要 nvidia-container-toolkit,所以容器
+# 裡跑 embedding 等於一定用 CPU。既然如此,這裡就讓 uv 解平台原生的 torch:
+#   - Linux / Windows + NVIDIA → 自動拿到 CUDA 版
+#   - macOS (Apple Silicon)    → 原生 wheel 本來就支援 MPS
+# 代價是 Linux 純 CPU 機器會多抓 ~2-3GB 的 nvidia-* 套件。真的不想要的話,自己加:
+#   [[tool.uv.index]] name = "pytorch-cpu" url = "https://download.pytorch.org/whl/cpu" explicit = true
+#   [tool.uv.sources] torch = [{ index = "pytorch-cpu" }]
+#
+# (查詢端 CourseLangChain 的情況相反 —— 那邊只 embed 一句 query,維持 CPU 釘選。)
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prep"]

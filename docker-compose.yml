@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: paradedb/paradedb:latest
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: academic
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    shm_size: 1gb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d academic"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    volumes:
+      - prepdata:/var/lib/postgresql/18/docker
+
+  # Step 1: SQLite -> PostgreSQL, straight into the database above. Behind a
+  # profile so it never starts alongside postgres — run it explicitly:
+  #
+  #   LOAD_SQLITE=/path/to/1151.db docker compose --profile load run --rm pgloader
+  #
+  # No arm64 image is published, so Apple Silicon runs it under emulation.
+  pgloader:
+    image: ghcr.io/dimitri/pgloader:latest
+    platform: linux/amd64
+    profiles: ["load"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # A default, not ${LOAD_SQLITE:?...}: a required variable makes *every*
+      # compose command fail, including `up -d postgres`.
+      - ${LOAD_SQLITE:-./raw/missing-set-LOAD_SQLITE.db}:/data/source.db:ro
+    command: >
+      pgloader
+      sqlite:///data/source.db
+      postgresql://postgres:postgres@postgres:5432/academic
+
+volumes:
+  prepdata:

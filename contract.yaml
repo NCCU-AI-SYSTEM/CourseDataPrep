@@ -1,0 +1,30 @@
+# Data contract — the values here must match CourseLangChain's contract.yaml.
+#
+# What belongs here: properties of the DATA. Change one and existing artifacts
+# become wrong or incomparable. Committed to git, identical in both repos.
+#
+# What does NOT belong here: anything about a particular machine — database
+# location, credentials, which device embedding runs on. Those live in the
+# environment (DATABASE_URL, EMBED_DEVICE).
+#
+# Nothing in this file is overridable by an environment variable, on purpose:
+# a setting should have exactly one source.
+#
+# prep.migrate writes these into the database's schema_meta table; the query side
+# compares at startup and refuses to serve on a mismatch. Change it in both repos,
+# re-run the pipeline, and ship a new artifact.
+
+# Bump when init-scripts change the table structure.
+schema_version: 6
+
+# The embedding model. The query side encodes with this same model, so a mismatch
+# makes vectors incomparable — retrieval would not error, just rank nonsense.
+embed_model: BAAI/bge-base-zh-v1.5
+embed_dim: 768
+
+# Deprecated: only build_sqlite (the old FAISS path) uses this.
+sqlite_embed_model: BAAI/bge-m3
+
+# Which semester to prepare.
+course_year: "115"
+course_semester: "1"
