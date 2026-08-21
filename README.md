@@ -49,14 +49,26 @@ docker compose exec postgres psql -U postgres -d academic -c "
 DO \$\$
 DECLARE r RECORD;
 BEGIN
-    FOR r IN (SELECT table_name, column_name FROM information_schema.columns
-              WHERE table_schema='public' AND data_type='bigint')
+    -- The join to information_schema.tables is load-bearing: columns lists views
+    -- too, and an image that ships pg_stat_statements puts pg_stat_statements_info
+    -- in public with a bigint column. ALTER COLUMN on a view is a hard error.
+    FOR r IN (SELECT c.table_name, c.column_name
+              FROM information_schema.columns c
+              JOIN information_schema.tables t
+                ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+              WHERE c.table_schema = 'public'
+                AND c.data_type = 'bigint'
+                AND t.table_type = 'BASE TABLE')
     LOOP
         EXECUTE format('ALTER TABLE %I ALTER COLUMN %I TYPE integer', r.table_name, r.column_name);
     END LOOP;
 END;
 \$\$;"
 ```
+
+Run this immediately after pgloader, before step 4. `course.pk` and
+`course_chunk.chunk_id` are `bigserial`, so running it again once the schema is
+applied would narrow those keys to `integer` as well.
 
 Check:
 
