@@ -23,6 +23,9 @@ EMBED_DIM: int = int(CONTRACT["embed_dim"])
 SQLITE_EMBED_MODEL: str = CONTRACT["sqlite_embed_model"]
 COURSE_YEAR: str = str(CONTRACT["course_year"])
 COURSE_SEMESTER: str = str(CONTRACT["course_semester"])
+V4_EMBED_MODEL: str = CONTRACT["v4_embed_model"]
+V4_EMBED_DIM: int = int(CONTRACT["v4_embed_dim"])
+V4_BM25_TOKENS: str = CONTRACT["v4_bm25_tokens"]
 
 SCHEMA_META = {
     "schema_version": str(SCHEMA_VERSION),
@@ -30,7 +33,13 @@ SCHEMA_META = {
     "embed_dim": str(EMBED_DIM),
     "course_year": COURSE_YEAR,
     "course_semester": COURSE_SEMESTER,
+    "v4_embed_model": V4_EMBED_MODEL,
+    "v4_embed_dim": str(V4_EMBED_DIM),
+    "v4_bm25_tokens": V4_BM25_TOKENS,
 }
+
+# The semester as scheduling_test writes it ("115-1"), for course_struct.db and release names.
+SEMESTER_LABEL = f"{COURSE_YEAR}-{COURSE_SEMESTER}"
 
 
 DEFAULT_DATABASE_URL = "postgresql://postgres:postgres@localhost:5433/academic"

@@ -18,8 +18,8 @@
 # travel inside the artifact. The consumer compares its copy against schema_meta
 # at startup and refuses to serve on a mismatch.
 
-# Bump when init-scripts change the table structure.
-schema_version: 8
+# Bump when init-scripts change the table structure, or the v4 schema below changes.
+schema_version: 9
 
 # The embedding model. Queries are encoded with this same model, so a mismatch
 # makes vectors incomparable — retrieval would not error, just rank nonsense.
@@ -33,3 +33,13 @@ sqlite_embed_model: BAAI/bge-m3
 # all scope to it.
 course_year: "115"
 course_semester: "1"
+
+# The v4 course search (scheduling_test docs/v4), loaded by prep.load_v4 into the `v4`
+# schema from the course_struct.db that scheduling_test's prepare_semester builds.
+# Queries are encoded with this model and tokenised the same way, so a mismatch on
+# either ranks nonsense without erroring.
+v4_embed_model: intfloat/multilingual-e5-large-instruct
+v4_embed_dim: 1024
+# char12: CJK runs as single characters plus bigrams, other runs as lowercase words,
+# joined by spaces and indexed with pdb.whitespace (src/retrievers/sparse._char12).
+v4_bm25_tokens: char12
