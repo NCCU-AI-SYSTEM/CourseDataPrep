@@ -15,6 +15,41 @@ artifact and just want to run the application, you do not need this repo.
 - `python >= 3.13` and [`uv`](https://github.com/astral-sh/uv)
 - Docker
 - A SQLite database from the crawler ([NCCUCourse](https://github.com/NCCUCourseScheduling/NCCUCourse)), not in git
+- A checkout of `scheduling_test` next to this repo (or `V4_REPO=<path>`): its
+  `prepare_semester` builds the v4 search data (`course_struct.db`)
+
+## One command
+
+```sh
+docker compose up -d postgres
+uv sync
+uv run python -m prep.release build --source <crawler>.db            # build and check
+uv run python -m prep.release build --source <crawler>.db --promote  # ... and make it current
+uv run python -m prep.release build --from embed                     # resume the last .partial
+uv run python -m prep.release list | promote <name> | rollback
+```
+
+It runs every step below in order, for the semester in `contract.yaml`, and
+writes one folder per build:
+
+```
+releases/
+  115-1_20261102-0300/
+    data.sql.gz        the artifact (schemas public and v4)
+    contract.yaml      copy of this repo's, ships with it
+    manifest.json      sha256 of each file and of the source, row counts, commits, step times
+    prepare_report.md  the v4 coverage gate, the diff against the live build, PostgreSQL counts
+    course_struct.db   the v4 data as SQLite, for scheduling_test's offline evaluation
+    logs/
+  current  -> 115-1_20261102-0300
+  previous -> 115-1_20261101-0300
+```
+
+A step that fails stops the build in `<name>.partial/`; nothing becomes `current`
+until every step, including `prep.check`, has passed. Trial on 114-2 (RTX 5080):
+3.5 minutes, of which embed 115 s and dump 48 s.
+
+The sections below are the same steps by hand.
 
 ---
 
@@ -197,6 +232,19 @@ torch is deliberately **not** pinned to the CPU wheel index (see
 `pyproject.toml`), so Linux and Windows with NVIDIA get the CUDA build, and the
 native macOS wheels already support MPS.
 
+## 6b. Load the v4 search
+
+`scheduling_test`'s `prepare_semester` builds `course_struct.db` for the same
+semester (structured fields, sessions, assessment, e5 vectors) and stops when its
+coverage gate fails. Load it into the `v4` schema:
+
+```sh
+uv run python -m prep.load_v4 --db <scheduling_test>/data/v4/staging/115-1/course_struct.db
+```
+
+The file is refused when its semester, embedding model or dimension disagree with
+`contract.yaml`. The load replaces `v4` in one transaction and leaves `public` alone.
+
 ## 7. Build the artifact
 
 Check first. Two things block shipping — `schema_meta` disagreeing with
@@ -213,10 +261,17 @@ usually has no postgres client; `gzip` runs here:
 
 ```sh
 docker compose exec -T postgres pg_dump -U postgres -d academic \
-  -Fp --no-owner --no-privileges | gzip > data.sql.gz
+  -Fp --no-owner --no-privileges -n public -n v4 \
+  | sed 's/^CREATE SCHEMA public;$/CREATE SCHEMA IF NOT EXISTS public;/' | gzip > data.sql.gz
 ```
 
 `-T` matters: without it compose allocates a TTY and corrupts the pipe.
+
+`-n public -n v4` matters too: the ParadeDB image creates the `paradedb`, `tiger` and
+`topology` schemas (pg_search, PostGIS) in every new database, so a full dump restored
+into a fresh container stops at `schema "paradedb" already exists`. The extensions the
+data needs, `vector` and `pg_search`, come with the image. Naming `public` with `-n` makes pg_dump create
+it, which every new database already has; the `sed` turns that into `IF NOT EXISTS`.
 
 The format is `-Fp … | gzip`, not `-Fc`: the postgres entrypoint restores
 `*.sql` and `*.sql.gz` on first start but ignores `.dump`, so plain SQL needs no
