@@ -2,7 +2,7 @@ services:
   postgres:
     image: paradedb/paradedb:latest
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"   # localhost only: the password is the default one
     environment:
       POSTGRES_DB: academic
       POSTGRES_USER: postgres
@@ -30,8 +30,11 @@ services:
         condition: service_healthy
     volumes:
       - ${LOAD_SQLITE:-./data.db}:/data/source.db:ro
+    # Small batches: a full crawl (100k courses with syllabus text, ~200 MB) exhausts
+    # pgloader's default heap ("Heap exhausted, game over") with the default batch sizes.
     command: >
       pgloader
+      --with "prefetch rows = 2000" --with "batch rows = 2000" --with "workers = 2" --with "concurrency = 1"
       sqlite:///data/source.db
       postgresql://postgres:postgres@postgres:5432/academic
 
