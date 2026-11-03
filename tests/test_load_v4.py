@@ -14,8 +14,8 @@ import tempfile
 from pathlib import Path
 
 from prep.contract import SEMESTER_LABEL, V4_EMBED_DIM
-from prep.load_v4 import pg_type, preflight, vector_literal
-from tests.fixtures import COURSES, make_struct_db, vector
+from prep.load_v4 import pg_type, preflight, quote_ident, vector_literal
+from tests.fixtures import COURSES, make_struct_db, scratch_database, vector
 
 
 def _problems(**kw) -> list[str]:
@@ -54,8 +54,13 @@ def test_preflight_rejects_mismatches() -> None:
     assert any("without a vector" in p for p in _problems(drop_embedding_for=COURSES[1][0]))
 
 
+def test_quote_ident() -> None:
+    assert quote_ident("session") == '"session"'
+    assert quote_ident('we"ird') == '"we""ird"'
+
+
 def test_load_into_postgres() -> None:
-    if not os.environ.get("DATABASE_URL"):
+    if not scratch_database():
         return "skipped: DATABASE_URL not set"
     import psycopg2
 

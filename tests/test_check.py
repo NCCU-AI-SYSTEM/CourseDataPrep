@@ -10,7 +10,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from tests.fixtures import make_struct_db
+from tests.fixtures import make_struct_db, scratch_database
 
 
 def _loaded_conn():
@@ -28,7 +28,7 @@ def _loaded_conn():
 
 
 def test_verify_v4() -> str | None:
-    if not os.environ.get("DATABASE_URL"):
+    if not scratch_database():
         return "skipped: DATABASE_URL not set"
     from prep.check import verify_v4
 

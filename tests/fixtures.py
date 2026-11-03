@@ -1,10 +1,25 @@
 """A tiny course_struct.db shaped like scheduling_test's build_runtime output."""
 from __future__ import annotations
 
+import os
 import sqlite3
 import struct
 
-from prep.contract import SEMESTER_LABEL, V4_EMBED_DIM, V4_EMBED_MODEL
+from prep.contract import DEFAULT_DATABASE_URL, SEMESTER_LABEL, V4_EMBED_DIM, V4_EMBED_MODEL
+
+
+def scratch_database() -> bool:
+    """True when DATABASE_URL names a database the tests may overwrite.
+
+    The tests replace the v4 schema with a two-course fixture of the contract's semester,
+    which would ship if it landed in the build database before a dump."""
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return False
+    if url == DEFAULT_DATABASE_URL:
+        raise SystemExit("refusing to run database tests against the build database "
+                         f"({DEFAULT_DATABASE_URL}); point DATABASE_URL at a scratch database")
+    return True
 
 COURSES = [
     # course_id, name, lang, cats, lmt_kind, point, unit, text, toks, sessions

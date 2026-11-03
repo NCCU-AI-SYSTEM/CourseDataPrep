@@ -19,6 +19,11 @@ import psycopg2
 from .contract import COURSE_SEMESTER, COURSE_YEAR, SCHEMA_META, SEMESTER_LABEL, V4_EMBED_DIM, database_url
 
 
+# v4 leaves out cancelled courses (114-2: 2,655 searchable of 2,795); a much smaller v4.doc
+# came from another build or a test fixture.
+MIN_V4_SHARE = 0.8
+
+
 def verify_v4(cur) -> list[str]:
     """Problems with the v4 schema; empty when it is fit to ship."""
     cur.execute("SELECT to_regclass('v4.doc'), to_regclass('v4.meta')")
@@ -35,6 +40,13 @@ def verify_v4(cur) -> list[str]:
         problems.append("v4.doc is empty")
     if wrong_dim:
         problems.append(f"{wrong_dim} v4.doc vectors are not {V4_EMBED_DIM}-dimensional")
+    cur.execute("SELECT to_regclass('public.course')")
+    if docs and cur.fetchone()[0] is not None:
+        cur.execute("SELECT count(DISTINCT id) FROM public.course WHERE y::text = %s AND s::text = %s",
+                    (COURSE_YEAR, COURSE_SEMESTER))
+        offered = cur.fetchone()[0]
+        if offered and docs < MIN_V4_SHARE * offered:
+            problems.append(f"v4.doc has {docs} courses but public.course has {offered} for {SEMESTER_LABEL}")
     cur.execute("SELECT 1 FROM pg_indexes WHERE schemaname = 'v4' AND indexname = 'doc_bm25'")
     if cur.fetchone() is None:
         problems.append("v4.doc has no bm25 index (doc_bm25) — rerun prep.load_v4")

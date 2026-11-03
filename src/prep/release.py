@@ -82,6 +82,21 @@ class Build:
     skip_aspects: bool
 
 
+def db_owner_path(base: Path) -> Path:
+    """Which build last reset the shared database; resuming another build past reset is refused."""
+    return base / ".db_owner"
+
+
+def resume_problems(state: dict, step: str, name: str, db_owner: str | None) -> list[str]:
+    """Why resuming `name` at `step` would mix in work that is not this build's."""
+    done = state.get("step_seconds", {})
+    before = STEPS[:STEPS.index(step)]
+    problems = [f"step {s} has not finished in this build" for s in before if s not in done]
+    if "reset" in before and db_owner != name:
+        problems.append(f"the database was last reset by {db_owner or 'another build'}, not {name}")
+    return problems
+
+
 def steps_from(step: str | None) -> tuple[str, ...]:
     if step is None:
         return STEPS
@@ -158,11 +173,20 @@ def _v4_python(repo: Path) -> list[str]:
 def step_v4(b: Build) -> None:
     cmd = _v4_python(b.v4_repo) + ["-m", "scripts.v4.prepare_semester", "--semester", SEMESTER_LABEL,
                                    "--src", str(b.source), "--llm", b.llm] + (["--skip-aspects"] * b.skip_aspects)
+    for name in ("prepare_report.md", "course_struct.db"):
+        (b.dir / name).unlink(missing_ok=True)      # a rerun must not keep the previous attempt's copy
+    t0 = time.time()
     code, _ = _run(cmd, b.dir / "logs" / "v4.log", cwd=b.v4_repo)
     stage = b.v4_repo / "data" / "v4" / "staging" / SEMESTER_LABEL
-    for name in ("prepare_report.md", "course_struct.db"):
-        if (stage / name).exists():
-            shutil.copy2(stage / name, b.dir / name)
+    if code in (0, 1):   # 2 = a step errored: whatever is in staging may be an older build
+        for name in ("prepare_report.md", "course_struct.db"):
+            f = stage / name
+            if f.exists() and f.stat().st_mtime >= t0 - 1:
+                shutil.copy2(f, b.dir / name)
+    if code == 0 and not (b.dir / "course_struct.db").exists():
+        raise SystemExit(f"[release] prepare_semester passed but wrote no new course_struct.db in {stage}")
+    if code == 1 and not (b.dir / "prepare_report.md").exists():
+        raise SystemExit(f"[release] prepare_semester exited 1 without a new report; log: {b.dir / 'logs' / 'v4.log'}")
     if code == 1:
         raise SystemExit(f"[release] v4 quality gate failed; see {b.dir / 'prepare_report.md'}")
     if code:
@@ -181,6 +205,7 @@ def _sql(statement: str, params: tuple = ()) -> list[tuple]:
 
 def step_reset(b: Build) -> None:
     _sql("DROP SCHEMA IF EXISTS v4 CASCADE; DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;")
+    db_owner_path(b.dir.parent).write_text(b.dir.name)
 
 
 def step_pgloader(b: Build) -> None:
@@ -211,15 +236,20 @@ def dump_line(line: bytes) -> bytes:
 
 def step_dump(b: Build) -> None:
     tmp = b.dir / "data.sql.gz.tmp"
+    log = b.dir / "logs" / "dump.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
     cmd = ["docker", "compose", "exec", "-T", "postgres", "pg_dump", "-U", "postgres", "-d", "academic",
            "-Fp", "--no-owner", "--no-privileges", *DUMP_SCHEMAS]
-    with gzip.open(tmp, "wb") as out, subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=subprocess.PIPE) as p:
-        for line in p.stdout:
-            out.write(dump_line(line))
-    if p.returncode:
-        tmp.unlink(missing_ok=True)
-        raise SystemExit(f"[release] pg_dump exited {p.returncode}")
-    os.replace(tmp, b.dir / "data.sql.gz")
+    try:
+        with log.open("wb") as err, gzip.open(tmp, "wb") as out, subprocess.Popen(
+                cmd, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=err) as p:
+            for line in p.stdout:
+                out.write(dump_line(line))
+        if p.returncode:
+            raise SystemExit(f"[release] pg_dump exited {p.returncode}; log: {log}")
+        os.replace(tmp, b.dir / "data.sql.gz")
+    finally:
+        tmp.unlink(missing_ok=True)      # disk full, Ctrl-C or a failed pg_dump leave no half file
 
 
 def _commit(repo: Path) -> str:
@@ -242,6 +272,9 @@ def _counts() -> dict[str, int]:
 
 
 def step_manifest(b: Build, state: dict) -> None:
+    missing = [n for n in ("data.sql.gz", "course_struct.db") if not (b.dir / n).exists()]
+    if missing:
+        raise SystemExit(f"[release] {b.dir.name} has no {', '.join(missing)}; rerun the steps that make them")
     shutil.copy2(CONTRACT_PATH, b.dir / "contract.yaml")
     counts = _counts()
     report = b.dir / "prepare_report.md"
@@ -292,6 +325,19 @@ def build(a: argparse.Namespace) -> None:
         d.mkdir()
     state_path = d / "build.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    if a.from_step:
+        owner_file = db_owner_path(base)
+        owner = owner_file.read_text().strip() if owner_file.exists() else None
+        problems = resume_problems(state, a.from_step, d.name, owner)
+        if (a.source and "source" in state and a.source.resolve() != Path(state["source"])
+                and STEPS.index(a.from_step) > STEPS.index("pgloader")):
+            problems.append(f"--source differs from the one this build loaded ({state['source']})")
+        if problems:
+            raise SystemExit(f"[release] cannot resume {d.name} at {a.from_step}:\n"
+                             + "\n".join(f"  - {p}" for p in problems)
+                             + "\nStart a new build, or resume at an earlier step.")
+        for s in steps:      # the steps about to run count as not done until they finish again
+            state.get("step_seconds", {}).pop(s, None)
     source = (a.source or (Path(state["source"]) if "source" in state else None))
     if source is None or not source.exists():
         raise SystemExit(f"[release] crawler SQLite not found: {source} (pass --source)")

@@ -1,6 +1,10 @@
 services:
   postgres:
-    image: paradedb/paradedb:latest
+    # Pinned: the artifact's bm25 index and pdb.* casts restore only into the same
+    # pg_search, and PG18's pg_dump writes \restrict lines older psql cannot read.
+    # This is the 2026/10/29 image (PostgreSQL 18.6, pg_search 0.26.4, pgvector 0.8.6);
+    # CourseLangChain's compose pins the same digest. Bump both together.
+    image: paradedb/paradedb:latest@sha256:4abbafffb4e59e679821c5882faf91c494022bb3242fc73b789e753f43df1361
     ports:
       - "127.0.0.1:5433:5432"   # localhost only: the password is the default one
     environment:
@@ -22,7 +26,8 @@ services:
   #
   #   LOAD_SQLITE=/path/to/1151.db docker compose --profile load run --rm pgloader
   pgloader:
-    image: ghcr.io/dimitri/pgloader:latest
+    # Pinned (3.6.10): prep.release reads its summary table to catch rejected rows.
+    image: ghcr.io/dimitri/pgloader:latest@sha256:a1d4a78e78a64e46cd3fc7dfc57d24eb91ffb1a5520f2b1f55631815e3658d6e
     platform: linux/amd64
     profiles: ["load"]
     depends_on:

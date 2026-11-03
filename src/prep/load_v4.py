@@ -99,20 +99,26 @@ def preflight(con: sqlite3.Connection) -> tuple[str | None, list[str]]:
     return name, problems
 
 
+def quote_ident(name: str) -> str:
+    """An identifier taken from the SQLite file, quoted with embedded quotes doubled."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _copy_table(scon: sqlite3.Connection, cur, table: str) -> int:
-    cols = scon.execute(f'PRAGMA table_info("{table}")').fetchall()   # cid, name, type, notnull, dflt, pk
-    defs = ", ".join(f'"{c[1]}" {pg_type(c[2])}' for c in cols)
-    cur.execute(f'CREATE TABLE {SCHEMA}."{table}" ({defs})')
+    q = quote_ident
+    cols = scon.execute(f"PRAGMA table_info({q(table)})").fetchall()   # cid, name, type, notnull, dflt, pk
+    defs = ", ".join(f"{q(c[1])} {pg_type(c[2])}" for c in cols)
+    cur.execute(f"CREATE TABLE {SCHEMA}.{q(table)} ({defs})")
     names = [c[1] for c in cols]
     blobs = [i for i, c in enumerate(cols) if pg_type(c[2]) == "bytea"]
-    rows = scon.execute(f'SELECT {", ".join(chr(34) + n + chr(34) for n in names)} FROM "{table}"').fetchall()
+    rows = scon.execute(f"SELECT {', '.join(q(n) for n in names)} FROM {q(table)}").fetchall()
     if blobs:
         rows = [tuple(psycopg2.Binary(v) if i in blobs and v is not None else v for i, v in enumerate(r))
                 for r in rows]
     if rows:
-        execute_values(cur, f'INSERT INTO {SCHEMA}."{table}" VALUES %s', rows, page_size=1000)
+        execute_values(cur, f"INSERT INTO {SCHEMA}.{q(table)} VALUES %s", rows, page_size=1000)
     if "course_id" in names:
-        cur.execute(f'CREATE INDEX "{table}_course" ON {SCHEMA}."{table}" (course_id)')
+        cur.execute(f"CREATE INDEX {q(table + '_course')} ON {SCHEMA}.{q(table)} (course_id)")
     return len(rows)
 
 

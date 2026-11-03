@@ -9,10 +9,35 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from prep import releases as R
 import sqlite3
 
-from prep.release import STEPS, dump_line, pgloader_errors, source_type_problems, steps_from
+from prep import releases as R
+from prep.release import STEPS, dump_line, pgloader_errors, resume_problems, source_type_problems, steps_from
+
+# pgloader 3.6.10 summaries from the 114-2 trial (hopelab, 2026/11/02): a clean load, and
+# the old crawler file whose COURSE.smtQty held text (every row rejected, exit code 0).
+PGLOADER_OK = """\
+2026-11-02T01:32:45.911958Z LOG report summary reset
+             table name     errors       rows      bytes      total time
+-----------------------  ---------  ---------  ---------  --------------
+                  fetch          0          0                     0.000s
+        fetch meta data          0          8                     0.014s
+          Create tables          0          8                     0.007s
+-----------------------  ---------  ---------  ---------  --------------
+          public.course          0     101883   207.2 MB          2.019s
+         public.teacher          0       1067    17.7 kB          0.070s
+            public.rate          0     269241    31.5 MB          0.519s
+          public.result          0       5396   379.2 kB          0.045s
+-----------------------  ---------  ---------  ---------  --------------
+COPY Threads Completion          0          2                     2.540s
+"""
+PGLOADER_REJECTED = """\
+2026-11-02T01:29:05.165997Z ERROR Error while formatting a row from "public.course":
+2026-11-02T01:29:05.165997Z ERROR junk in string "單學期科目"
+          public.course     101883          0                     1.579s
+         public.teacher          0       1067    17.7 kB          0.049s
+      Total import time     101883     275704    31.9 MB          2.288s
+"""
 
 
 def _dirs(root: Path, *names: str) -> None:
@@ -102,6 +127,21 @@ def test_pgloader_errors() -> None:
     assert len(pgloader_errors(bad)) == 1
     counted = ok.replace("public.course  0  3650", "public.course  2  3648")
     assert pgloader_errors(counted) == ["public.course: 2 rows failed"]
+    assert pgloader_errors(PGLOADER_OK) == []
+    rejected = pgloader_errors(PGLOADER_REJECTED)
+    assert "public.course: 101883 rows failed" in rejected and len(rejected) == 3, rejected
+
+
+def test_resume_problems() -> None:
+    done = {"step_seconds": {s: 1.0 for s in STEPS[:STEPS.index("dump")]}}
+    assert resume_problems(done, "dump", "115-1_a.partial", "115-1_a.partial") == []
+    # dump failed, then --from manifest: dump never finished
+    assert resume_problems(done, "manifest", "115-1_a.partial", "115-1_a.partial") == [
+        "step dump has not finished in this build"]
+    # another build reset the shared database since
+    assert any("115-1_b.partial" in p for p in resume_problems(done, "dump", "115-1_a.partial", "115-1_b.partial"))
+    # resuming at or before reset does not care who reset the database last
+    assert resume_problems({"step_seconds": {"v4": 1.0}}, "reset", "115-1_a.partial", None) == []
 
 
 def test_source_type_problems() -> None:

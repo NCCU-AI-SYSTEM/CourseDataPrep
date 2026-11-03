@@ -153,8 +153,10 @@ uv run python -m prep.migrate
 # [migrate] applying 04-time-columns.sql ...
 # [migrate] applying 05-chunks.sql ...
 # [migrate] done. schema_meta:
-#            schema_version = 8
+#            schema_version = 9
 #            embed_model = BAAI/bge-base-zh-v1.5
+#            ...
+#            v4_embed_model = intfloat/multilingual-e5-large-instruct
 ```
 
 Idempotent, so it also upgrades an existing database.
@@ -253,13 +255,15 @@ downstream:
 
 ```sh
 uv run python -m prep.check
-# [check] passed: 2925 courses, 28634 chunks, all embedded.
+# [check] passed: 2795 courses, 27896 chunks, all embedded; v4 114-2: 2655 searchable courses.
 ```
 
 Then dump. `pg_dump` runs inside the container, since a development machine
-usually has no postgres client; `gzip` runs here:
+usually has no postgres client; `gzip` runs here. `pipefail` makes a failed
+`pg_dump` fail the whole pipe instead of leaving a truncated `data.sql.gz`:
 
 ```sh
+set -o pipefail
 docker compose exec -T postgres pg_dump -U postgres -d academic \
   -Fp --no-owner --no-privileges -n public -n v4 \
   | sed 's/^CREATE SCHEMA public;$/CREATE SCHEMA IF NOT EXISTS public;/' | gzip > data.sql.gz
